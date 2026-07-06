@@ -118,10 +118,13 @@ jobs:
         working-directory: global/iam
         run: |
           set -o pipefail
+          PLAN_FILE="tfplan"
           PLAN_OUTPUT="$(mktemp)"
 
-          terraform plan -no-color -input=false 2>&1 | tee "$PLAN_OUTPUT"
-          PLAN_EXIT="${PIPESTATUS[0]}"
+          terraform plan -no-color -input=false -out="$PLAN_FILE"
+          PLAN_EXIT=$?
+
+          terraform show -no-color "$PLAN_FILE" | tee "$PLAN_OUTPUT"
 
           {
             echo "## Terraform Plan: \`global/iam\`"
@@ -163,10 +166,13 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: |
           set -o pipefail
+          PLAN_FILE="tfplan"
           PLAN_OUTPUT="$(mktemp)"
 
-          terraform plan -no-color -input=false 2>&1 | tee "$PLAN_OUTPUT"
-          PLAN_EXIT="${PIPESTATUS[0]}"
+          terraform plan -no-color -input=false -out="$PLAN_FILE"
+          PLAN_EXIT=$?
+
+          terraform show -no-color "$PLAN_FILE" | tee "$PLAN_OUTPUT"
 
           {
             echo "## Terraform Plan: \`${{ matrix.module }}\`"
