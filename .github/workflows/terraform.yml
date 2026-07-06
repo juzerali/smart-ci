@@ -1,0 +1,179 @@
+name: Smart CI/CD Pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  detect-changes:
+    name: Detect affected modules
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.matrix.outputs.skip }}
+      modules: ${{ steps.matrix.outputs.modules }}
+      has_global_iam: ${{ steps.matrix.outputs.has_global_iam }}
+      downstream_modules: ${{ steps.matrix.outputs.downstream_modules }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            payment_api:
+              - 'apps/payment-api/**'
+            user_api:
+              - 'apps/user-api/**'
+            global_s3:
+              - 'global/s3/**'
+            global_iam:
+              - 'global/iam/**'
+
+      - name: Build module matrix
+        id: matrix
+        env:
+          PAYMENT_API: ${{ steps.filter.outputs.payment_api }}
+          USER_API: ${{ steps.filter.outputs.user_api }}
+          GLOBAL_S3: ${{ steps.filter.outputs.global_s3 }}
+          GLOBAL_IAM: ${{ steps.filter.outputs.global_iam }}
+        run: |
+          set -euo pipefail
+
+          # Skip when changes are only outside monitored Terraform modules
+          if [ "$PAYMENT_API" != "true" ] && [ "$USER_API" != "true" ] && \
+             [ "$GLOBAL_IAM" != "true" ] && [ "$GLOBAL_S3" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "modules=[]" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Pipeline skipped"
+              echo ""
+              echo "No changes detected in monitored Terraform modules — no plans required."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "has_global_iam=$GLOBAL_IAM" >> "$GITHUB_OUTPUT"
+
+          MODULES=""
+          if [ "$GLOBAL_IAM" = "true" ]; then
+            MODULES="global/iam"
+          fi
+          if [ "$GLOBAL_S3" = "true" ]; then
+            MODULES="${MODULES:+$MODULES }global/s3"
+          fi
+          if [ "$PAYMENT_API" = "true" ] || [ "$GLOBAL_IAM" = "true" ]; then
+            MODULES="${MODULES:+$MODULES }apps/payment-api"
+          fi
+          if [ "$USER_API" = "true" ] || [ "$GLOBAL_IAM" = "true" ]; then
+            MODULES="${MODULES:+$MODULES }apps/user-api"
+          fi
+
+          if [ -z "$MODULES" ]; then
+            echo "modules=[]" >> "$GITHUB_OUTPUT"
+            echo "downstream_modules=[]" >> "$GITHUB_OUTPUT"
+          else
+            JSON="$(echo "$MODULES" | tr ' ' '\n' | jq -R . | jq -s -c .)"
+            echo "modules=$JSON" >> "$GITHUB_OUTPUT"
+            DOWNSTREAM="$(echo "$MODULES" | tr ' ' '\n' | jq -R . | jq -s -c 'map(select(. != "global/iam"))')"
+            echo "downstream_modules=$DOWNSTREAM" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "### Affected modules"
+            echo ""
+            if [ -z "$MODULES" ]; then
+              echo "No Terraform modules matched the changed paths."
+            else
+              echo "$MODULES" | tr ' ' '\n' | while IFS= read -r module; do
+                echo "- \`$module\`"
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  terraform-plan-global-iam:
+    name: Terraform plan (global/iam)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.skip != 'true' && needs.detect-changes.outputs.has_global_iam == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: global/iam
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: global/iam
+        run: |
+          set -o pipefail
+          PLAN_OUTPUT="$(mktemp)"
+
+          terraform plan -no-color -input=false 2>&1 | tee "$PLAN_OUTPUT"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+
+          {
+            echo "## Terraform Plan: \`global/iam\`"
+            echo ""
+            echo '```hcl'
+            cat "$PLAN_OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$PLAN_EXIT"
+
+  terraform-plan:
+    name: Terraform plan (${{ matrix.module }})
+    needs: [detect-changes, terraform-plan-global-iam]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.skip != 'true' &&
+      needs.detect-changes.outputs.downstream_modules != '[]' &&
+      (needs.terraform-plan-global-iam.result == 'success' || needs.terraform-plan-global-iam.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.detect-changes.outputs.downstream_modules) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ matrix.module }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -o pipefail
+          PLAN_OUTPUT="$(mktemp)"
+
+          terraform plan -no-color -input=false 2>&1 | tee "$PLAN_OUTPUT"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+
+          {
+            echo "## Terraform Plan: \`${{ matrix.module }}\`"
+            echo ""
+            echo '```hcl'
+            cat "$PLAN_OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$PLAN_EXIT"
