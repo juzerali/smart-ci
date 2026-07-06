@@ -64,7 +64,7 @@ jobs:
           if [ "$GLOBAL_IAM" = "true" ]; then
             MODULES="global/iam"
           fi
-          if [ "$GLOBAL_S3" = "true" ]; then
+          if [ "$GLOBAL_S3" = "true" ] || [ "$GLOBAL_IAM" = "true" ]; then
             MODULES="${MODULES:+$MODULES }global/s3"
           fi
           if [ "$PAYMENT_API" = "true" ] || [ "$GLOBAL_IAM" = "true" ]; then
